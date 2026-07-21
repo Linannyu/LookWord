@@ -269,6 +269,14 @@
     .book-current strong { display: inline; font-family: var(--serif); font-size: 17px; }
     .book-current em { margin-left: 8px; color: var(--cyan); font-size: 12px; font-style: normal; }
     .book-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+    .backup-actions {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding-left: 9px;
+      border-left: 1px solid rgba(85,109,149,.15);
+    }
+    .backup-label { color: #748097; font-size: 11px; font-weight: 750; white-space: nowrap; }
     .book-select {
       width: min(330px, 34vw);
       min-height: 38px;
@@ -959,6 +967,8 @@
       .book-current em { display: block; margin: 3px 0 0; }
       .book-actions { width: 100%; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
       .book-select { width: 100%; grid-column: 1 / -1; }
+      .backup-actions { grid-column: 1 / -1; justify-content: stretch; padding: 10px 0 0; border-top: 1px solid rgba(85,109,149,.12); border-left: 0; }
+      .backup-actions .btn { flex: 1; }
       .book-actions .btn { padding-inline: 10px; }
       .section-head { min-height: 0; margin: 22px 2px 12px; flex-direction: column; align-items: flex-start; }
       .section-head h2 { font-size: 29px; }
@@ -1036,10 +1046,12 @@
   </main>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
   <input id="bookFileInput" type="file" accept="application/json,.json" multiple hidden>
+  <input id="backupFileInput" type="file" accept="application/json,.json" hidden>
 
   <script src="./review-scheduler-config.js"></script>
   <script src="./review-scheduler.js"></script>
   <script src="./word_list/sat_words_offline.js"></script>
+  <script src="./data-backup.js"></script>
   <script>
     const curatedWords = [
       {word:'tally', phonetic:'/ˈtæli/', zh:'计数；记录；总数', en:'a current score or amount', example:'Keep a tally of every word you master.', memory:'tally 与 total 都和总数有关。'},
@@ -1082,6 +1094,7 @@
     const BUNDLED_BOOKS = [
       {id:DEFAULT_BOOK_ID, name:'SAT词汇词根+联想记忆法（乱序版）', url:DEFAULT_BOOK_URL, source:'builtin'},
       {name:'SAT 400词：例句、同义词与反义词', url:'./word_list/400词含例句同反义词.json', bundledKey:'400词含例句同反义词.json', offlineUrl:'./word_list/400词含例句同反义词.offline.js'},
+      {name:'机考SAT真题词汇1900（Day 1–24）', url:'./word_list/机考SAT真题词汇1900_Day1-24.json', bundledKey:'机考SAT真题词汇1900_Day1-24.json', offlineUrl:'./word_list/机考SAT真题词汇1900_Day1-24.offline.js'},
       {name:'机考SAT真题词汇2000（Day 1–10）', url:'./word_list/机考SAT真题词汇2000_Day1-10.json', bundledKey:'机考SAT真题词汇2000_Day1-10.json', offlineUrl:'./word_list/机考SAT真题词汇2000_Day1-10.offline.js'},
       {name:'机考SAT真题词汇2000（Day 11–20）', url:'./word_list/机考SAT真题词汇2000_Day11-20.json', bundledKey:'机考SAT真题词汇2000_Day11-20.json', offlineUrl:'./word_list/机考SAT真题词汇2000_Day11-20.offline.js'},
       {name:'机考SAT真题词汇2000（Day 21–26）', url:'./word_list/机考SAT真题词汇2000_Day21-26.json', bundledKey:'机考SAT真题词汇2000_Day21-26.json', offlineUrl:'./word_list/机考SAT真题词汇2000_Day21-26.offline.js'}
@@ -1373,6 +1386,84 @@
     const dbPutBook = record => dbRequest('readwrite', store => store.put(record));
     const dbDeleteBook = id => dbRequest('readwrite', store => store.delete(id));
 
+    function backupFileName() {
+      return 'LookWord-数据备份-' + new Date().toISOString().slice(0, 10) + '.json';
+    }
+
+    function downloadJsonFile(payload, fileName) {
+      const blob = new Blob([JSON.stringify(payload, null, 2)], {type:'application/json;charset=utf-8'});
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = fileName;
+      anchor.style.display = 'none';
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+    }
+
+    async function collectUploadedWordbooks() {
+      const books = new Map();
+      try {
+        (await dbListBooks()).forEach(book => {
+          if (book?.id?.startsWith('upload:') && Array.isArray(book.words)) books.set(book.id, book);
+        });
+      } catch (error) { /* 当前会话中仍可能保存着未持久化的导入词库 */ }
+      bookCatalog.filter(entry => entry.source === 'uploaded' && Array.isArray(entry.words)).forEach(entry => {
+        if (!books.has(entry.id)) books.set(entry.id, {id:entry.id, name:entry.name, fileName:entry.name + '.json', words:entry.words, updatedAt:Date.now()});
+      });
+      return [...books.values()];
+    }
+
+    function storedStateSnapshot() {
+      persist();
+      const raw = localStorage.getItem(STORE_KEY);
+      if (!raw) throw new Error('没有可导出的学习数据');
+      return JSON.parse(raw);
+    }
+
+    async function exportUserData() {
+      try {
+        if (!window.LookWordBackup) throw new Error('备份模块未加载');
+        const stateSnapshot = storedStateSnapshot();
+        const uploadedWordbooks = await collectUploadedWordbooks();
+        const payload = window.LookWordBackup.createBackupPayload({state:stateSnapshot, wordbooks:uploadedWordbooks});
+        downloadJsonFile(payload, backupFileName());
+        const sessionCount = Object.keys(payload.state.bookSessions || {}).length;
+        toast('已导出备份：' + sessionCount + ' 个学习记录、' + payload.uploadedWordbooks.length + ' 个自定义词库');
+      } catch (error) {
+        toast('导出备份失败：' + error.message);
+      }
+    }
+
+    async function restoreUserData(file) {
+      try {
+        if (!window.LookWordBackup) throw new Error('备份模块未加载');
+        const backup = window.LookWordBackup.parseBackupPayload(await file.text());
+        const restoredBooks = backup.uploadedWordbooks.map(book => {
+          const words = normalizeWords({words:book.words});
+          if (!words.length) throw new Error('自定义词库“' + book.name + '”没有可用单词');
+          return {...book, words};
+        });
+        const sessionCount = Object.keys(backup.state.bookSessions || {}).length;
+        const accepted = confirm('将恢复 ' + sessionCount + ' 个词库的学习进度和 ' + restoredBooks.length + ' 个自定义词库。当前学习进度会被替换；现有自定义词库会保留并与备份合并。确定继续吗？');
+        if (!accepted) return;
+        for (const book of restoredBooks) await dbPutBook({...book, updatedAt:Date.now()});
+        try {
+          const currentState = localStorage.getItem(STORE_KEY);
+          if (currentState) localStorage.setItem(STORE_KEY + ':before-restore', currentState);
+        } catch (error) { /* 恢复点仅作为额外保护，不影响恢复 */ }
+        localStorage.setItem(STORE_KEY, JSON.stringify(backup.state));
+        toast('数据已恢复，即将刷新页面');
+        setTimeout(() => location.reload(), 650);
+      } catch (error) {
+        toast('恢复失败：' + error.message);
+      } finally {
+        document.getElementById('backupFileInput').value = '';
+      }
+    }
+
     function loadOfflineWordbook(entry) {
       if (!entry.bundledKey || !entry.offlineUrl) return Promise.reject(new Error('没有离线词库资源'));
       const existing = window.__SAT_BUNDLED_WORDBOOKS__?.[entry.bundledKey];
@@ -1608,6 +1699,11 @@
           <select class="book-select" id="bookSelect" aria-label="选择单词表" ${bookLoading?'disabled':''}>${sortedBooks.map(book => `<option value="${escapeHTML(book.id)}" ${book.id===state.activeBookId?'selected':''}>${escapeHTML(book.name)}</option>`).join('')}</select>
           <button class="btn btn-ghost" id="scanBooks">↻ 扫描词表</button>
           <button class="btn btn-cyan" id="importBooks">＋ 导入 JSON</button>
+          <div class="backup-actions" aria-label="数据备份">
+            <span class="backup-label">学习数据</span>
+            <button class="btn btn-green" id="exportBackup" title="导出全部学习进度和自定义词库">↓ 导出备份</button>
+            <button class="btn btn-ghost" id="importBackup" title="恢复此前导出的学习数据">↑ 恢复备份</button>
+          </div>
           ${currentEntry?.source==='uploaded'?'<button class="btn btn-red" id="deleteBook">删除当前导入</button>':''}
         </div>
       </div>`;
@@ -1615,6 +1711,8 @@
       selector.onchange = () => switchWordbook(selector.value);
       document.getElementById('scanBooks').onclick = () => scanWordbookDirectory(false);
       document.getElementById('importBooks').onclick = () => document.getElementById('bookFileInput').click();
+      document.getElementById('exportBackup').onclick = exportUserData;
+      document.getElementById('importBackup').onclick = () => document.getElementById('backupFileInput').click();
       const deleteButton = document.getElementById('deleteBook');
       if (deleteButton) deleteButton.onclick = deleteCurrentUploadedBook;
     }
@@ -1629,7 +1727,7 @@
       document.getElementById('overview').innerHTML = `
         <div class="overview">
           <article class="hero glass">
-            <h1>Conquer <span class="gradient-word">SAT Words</span></h1>
+            <h1>一直学 <span class="gradient-word">一直爽</span></h1>
             <p class="hero-copy">用闪卡、测验、拼写、错词本、间隔重复、AI故事和打字战场，把抽象词汇变成长久记忆。每天的学习清单按目标生成后固定保存，完成后可由你决定是否追加新词。</p>
             <div class="stat-grid">
               <div class="stat"><strong>${total}</strong><span>词库总量</span></div>
@@ -1640,14 +1738,14 @@
           </article>
           <aside class="goal glass">
             <h2><span>◎</span>每日固定计划</h2>
-            <p>${learnedToday===0 && !plan.additions?'今天还未开始，保存目标会立即按数量调整并固定清单。':'今天已经开始，当前清单保持固定；修改目标会从下一个新日期生效。'}</p>
-            <div class="goal-row"><label for="dailyGoal">每日目标词数</label><input class="goal-input" id="dailyGoal" type="number" min="1" max="100" value="${state.dailyGoal}"><button class="btn btn-cyan" id="saveGoal">▣ 保存</button></div>
+            <p>${learnedToday===0 && !plan.additions?'今天还未开始，保存目标会立即按数量调整并固定清单。':'（说了一大堆很激励的话，你感到非常的亢奋）'}</p>
+            <div class="goal-row"><label for="dailyGoal">每日目标词数</label><input class="goal-input" id="dailyGoal" type="number" min="1" max="1000" value="${state.dailyGoal}"><button class="btn btn-cyan" id="saveGoal">▣ 保存</button></div>
             <div class="progress-label"><span>今日完成进度</span><span>${learnedToday} / ${plan.wordKeys.length}</span></div>
             <div class="progress"><i style="width:${percent}%"></i></div>
           </aside>
         </div>`;
       document.getElementById('saveGoal').onclick = () => {
-        state.dailyGoal = Math.max(1, Math.min(100, Number(document.getElementById('dailyGoal').value) || 7));
+        state.dailyGoal = Math.max(1, Math.min(1000, Number(document.getElementById('dailyGoal').value) || 100));
         const appliedToday = applyDailyGoalToToday(state.dailyGoal);
         persist(); renderApp();
         toast(appliedToday ? `今日固定清单已按目标调整为 ${ensureTodayPlan().wordKeys.length} 词` : '每日目标已保存，将从下一个新日期生效');
@@ -1691,9 +1789,9 @@
       const learnedToday = todayLearnedSet();
       const isComplete = todayPlanComplete();
       const contextTitle = isToday ? '今日学习列表' : state.orderScope === 'calendar' ? `${state.reviewDate || '历史日期'} 复习列表` : state.orderScope === 'manual' ? '待复习单词列表' : '错词复习列表';
-      const contextTag = isToday ? `${words.length} 词 · 今日固定` : state.orderScope === 'calendar' ? '日历复习' : state.orderScope === 'manual' ? '自主选择复习' : '错词复习';
+      const contextTag = isToday ? `${words.length} 词` : state.orderScope === 'calendar' ? '日历复习' : state.orderScope === 'manual' ? '自主选择复习' : '错词复习';
       const contextCopy = isToday
-        ? '清单每天固定；全部学习一次后，可自行选择追加多少单词。'
+        ? '快把今天的单词学完吧！不够学可以追加！'
         : state.orderScope === 'calendar' ? '这些词来自所选日期的实际学习记录。' : state.orderScope === 'manual' ? '这些词由“不好看”页面的待复习状态生成，不会改变今日固定清单。' : '这些词来自错词本，不会改变今日固定清单。';
       const returnToday = isToday ? '' : '<button class="mode-btn" id="returnToday">返回今日计划</button>';
       const remainingCandidates = library.length - new Set(plan.wordKeys).size;
@@ -2126,6 +2224,10 @@
     if(!['learn','quiz','wrong','game','story','calendar','notgood'].includes(state.view)) state.view='learn';
     if(state.orderScope==='today') state.order=[];
     document.getElementById('bookFileInput').addEventListener('change', event => importWordbookFiles(event.target.files));
+    document.getElementById('backupFileInput').addEventListener('change', event => {
+      const file = event.target.files?.[0];
+      if (file) restoreUserData(file);
+    });
     bootstrapWordbooks();
   </script>
 </body>

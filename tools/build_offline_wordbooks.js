@@ -7,6 +7,7 @@ const projectRoot = path.resolve(__dirname, '..');
 const wordListDirectory = path.join(projectRoot, 'word_list');
 const filenames = [
   '400词含例句同反义词.json',
+  '机考SAT真题词汇1900_Day1-24.json',
   '机考SAT真题词汇2000_Day1-10.json',
   '机考SAT真题词汇2000_Day11-20.json',
   '机考SAT真题词汇2000_Day21-26.json'

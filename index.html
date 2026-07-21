@@ -1416,6 +1416,19 @@
       return [...books.values()];
     }
 
+    function importedWordIdentity(word) {
+      if (word?.index !== null && word?.index !== undefined) return 'index:' + word.index;
+      return 'word:' + String(word?.word || '').toLowerCase() + '\u0000' + String(word?.phonetic || '');
+    }
+
+    function mergeImportedWords(currentWords, incomingWords) {
+      const merged = new Map();
+      [...(Array.isArray(currentWords) ? currentWords : []), ...(Array.isArray(incomingWords) ? incomingWords : [])].forEach(word => {
+        if (word?.word && !merged.has(importedWordIdentity(word))) merged.set(importedWordIdentity(word), word);
+      });
+      return [...merged.values()];
+    }
+
     function storedStateSnapshot() {
       persist();
       const raw = localStorage.getItem(STORE_KEY);
@@ -1441,24 +1454,37 @@
       try {
         if (!window.LookWordBackup) throw new Error('备份模块未加载');
         const backup = window.LookWordBackup.parseBackupPayload(await file.text());
+        const currentState = storedStateSnapshot();
+        const mergedState = window.LookWordBackup.mergeBackupState(currentState, backup.state);
         const restoredBooks = backup.uploadedWordbooks.map(book => {
           const words = normalizeWords({words:book.words});
           if (!words.length) throw new Error('自定义词库“' + book.name + '”没有可用单词');
           return {...book, words};
         });
         const sessionCount = Object.keys(backup.state.bookSessions || {}).length;
-        const accepted = confirm('将恢复 ' + sessionCount + ' 个词库的学习进度和 ' + restoredBooks.length + ' 个自定义词库。当前学习进度会被替换；现有自定义词库会保留并与备份合并。确定继续吗？');
+        const accepted = confirm('将把备份中的 ' + sessionCount + ' 个词库学习进度和 ' + restoredBooks.length + ' 个自定义词库合并到当前数据。熟悉度会保留较高值，错词、已学词和每日计划会取并集；当前数据不会被覆盖。确定继续吗？');
         if (!accepted) return;
-        for (const book of restoredBooks) await dbPutBook({...book, updatedAt:Date.now()});
+        for (const book of restoredBooks) {
+          const databaseBook = await dbGetBook(book.id);
+          const catalogBook = bookCatalog.find(entry => entry.id === book.id);
+          const currentWords = databaseBook?.words || catalogBook?.words || [];
+          const words = mergeImportedWords(currentWords, book.words);
+          await dbPutBook({
+            ...book,
+            name: databaseBook?.name || catalogBook?.name || book.name,
+            fileName: databaseBook?.fileName || book.fileName,
+            words,
+            updatedAt:Date.now()
+          });
+        }
         try {
-          const currentState = localStorage.getItem(STORE_KEY);
-          if (currentState) localStorage.setItem(STORE_KEY + ':before-restore', currentState);
+          localStorage.setItem(STORE_KEY + ':before-restore', JSON.stringify(currentState));
         } catch (error) { /* 恢复点仅作为额外保护，不影响恢复 */ }
-        localStorage.setItem(STORE_KEY, JSON.stringify(backup.state));
-        toast('数据已恢复，即将刷新页面');
+        localStorage.setItem(STORE_KEY, JSON.stringify(mergedState));
+        toast('数据已合并，即将刷新页面');
         setTimeout(() => location.reload(), 650);
       } catch (error) {
-        toast('恢复失败：' + error.message);
+        toast('合并备份失败：' + error.message);
       } finally {
         document.getElementById('backupFileInput').value = '';
       }
@@ -1702,7 +1728,7 @@
           <div class="backup-actions" aria-label="数据备份">
             <span class="backup-label">学习数据</span>
             <button class="btn btn-green" id="exportBackup" title="导出全部学习进度和自定义词库">↓ 导出备份</button>
-            <button class="btn btn-ghost" id="importBackup" title="恢复此前导出的学习数据">↑ 恢复备份</button>
+            <button class="btn btn-ghost" id="importBackup" title="将此前导出的学习数据合并到当前数据">↑ 合并备份</button>
           </div>
           ${currentEntry?.source==='uploaded'?'<button class="btn btn-red" id="deleteBook">删除当前导入</button>':''}
         </div>
